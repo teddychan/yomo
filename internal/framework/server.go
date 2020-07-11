@@ -6,6 +6,7 @@ import (
 	"github.com/yomorun/yomo/pkg/util"
 )
 
+// NewServer create the service for a plugin
 func NewServer(endpoint string, p plugin.YomoObjectPlugin) {
 	codec := json.NewCodec(p.Observed())
 	util.QuicServer(endpoint, p, codec)

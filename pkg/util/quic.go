@@ -122,7 +122,7 @@ func QuicServer(endpoint string, plugin plugin.YomoObjectPlugin, codec *json.Cod
 
 // GenerateTLSConfig Setup a bare-bones TLS config for the server
 func GenerateTLSConfig(host ...string) *tls.Config {
-	tlsCert, _ := Certificate(host...)
+	tlsCert, _ := certificate(host...)
 
 	return &tls.Config{
 		Certificates: []tls.Certificate{tlsCert},
@@ -131,7 +131,7 @@ func GenerateTLSConfig(host ...string) *tls.Config {
 	}
 }
 
-func Certificate(host ...string) (tls.Certificate, error) {
+func certificate(host ...string) (tls.Certificate, error) {
 	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		return tls.Certificate{}, err
