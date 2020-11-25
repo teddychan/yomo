@@ -1,9 +1,7 @@
 package yomo
 
 import (
-	"io"
-	"log"
-	"os"
+	"fmt"
 	"time"
 
 	"github.com/yomorun/yomo/pkg/pprof"
@@ -39,32 +37,48 @@ func RunStream(plugin plugin.YomoStreamPlugin, endpoint string) {
 func RunDev(plugin plugin.YomoObjectPlugin, endpoint string) {
 
 	go func() {
-		logger.Infof("plugin service [%s] start... [%s]", plugin.Name(), endpoint)
-
-		// activation service
-		framework.NewServer(endpoint, plugin)
-	}()
-
-	yomoEchoClient, err := util.QuicClient("161.189.140.133:11520")
-	//yomoEchoClient, err := util.QuicClient("localhost:11520")
-	if err != nil {
-		panic(err)
-	}
-
-	yomoPluginClient, err := util.QuicClient(endpoint)
-	if err != nil {
-		panic(err)
-	}
-
-	go io.Copy(yomoPluginClient, yomoEchoClient) // nolint
-	go io.Copy(os.Stdout, yomoPluginClient)      // nolint
-
-	for {
-		time.Sleep(time.Second)
-		_, err = yomoEchoClient.Write([]byte("ping"))
+		time.Sleep(2 * time.Second)
+		yomoPluginClient, err := util.QuicClient(endpoint)
 		if err != nil {
-			log.Fatal(err)
+			panic(err)
 		}
-	}
+
+		st, _ := yomoPluginClient.NewBidirectionalStream()
+
+		go func() {
+			for {
+				if st.IsReadable() {
+					buf := make([]byte, 3*1024)
+					//index := 0
+					for {
+						n, fin, err := st.Read(buf)
+						if err != nil {
+							fmt.Println("client:", err)
+							break
+						}
+
+						if n > 0 {
+							fmt.Println(string(buf[:n]))
+						}
+						if fin {
+							break
+						}
+					}
+				}
+			}
+		}()
+
+		i := 0
+		for {
+			i++
+			st.Write([]byte(("{\"id\":" + fmt.Sprint(i) + ",\"name\":\"yomo!\",\"test\":{\"tag\":[\"5G\",\"ioT\"]}}\n")))
+			st.Send()
+			time.Sleep(1 * time.Second)
+		}
+
+	}()
+	logger.Infof("plugin service [%s] start... [%s]", plugin.Name(), endpoint)
+
+	framework.NewServer(endpoint, plugin)
 
 }

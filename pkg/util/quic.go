@@ -1,30 +1,19 @@
 package util
 
 import (
-	"bytes"
-	"context"
-	"crypto/ecdsa"
-	"crypto/elliptic"
-	"crypto/rand"
-	"crypto/tls"
-	"crypto/x509"
-	"crypto/x509/pkix"
-	"encoding/pem"
+	"fmt"
 	"io"
 	"log"
-	"math/big"
-	"net"
-	"time"
 
+	"github.com/10cella/quicy/pkg/transport"
 	json "github.com/10cella/yomo-json-codec"
-	"github.com/lucas-clemente/quic-go"
-	quicGo "github.com/lucas-clemente/quic-go"
+
+	// "github.com/lucas-clemente/quic-go"
 	"github.com/yomorun/yomo/pkg/plugin"
 )
 
 var logger = GetLogger("yomo::quic")
 
-// YomoFrameworkStreamWriter is the stream of framework
 type YomoFrameworkStreamWriter struct {
 	Name   string
 	Codec  *json.Codec
@@ -40,7 +29,7 @@ func (w YomoFrameworkStreamWriter) Write(b []byte) (c int, e error) {
 			e = err.(error)
 		}
 	}()
-
+	// fmt.Println(b)
 	var (
 		err    error = nil
 		value  interface{}
@@ -50,7 +39,6 @@ func (w YomoFrameworkStreamWriter) Write(b []byte) (c int, e error) {
 	)
 
 	w.Codec.Decoder(b)
-
 	for {
 		value, err = w.Codec.Read(w.Plugin.Mold())
 		if err != nil {
@@ -82,7 +70,6 @@ func (w YomoFrameworkStreamWriter) Write(b []byte) (c int, e error) {
 		if result == nil {
 			continue
 		}
-
 		num, err = w.Codec.Write(w.Writer, result, w.Plugin.Mold())
 		if err != nil {
 			logger.Errorf("Codec.Write error: %s", err.Error())
@@ -118,194 +105,187 @@ func (w YomoFrameworkStreamWriter) process(value interface{}) (v interface{}, e 
 }
 
 // QuicClient create new QUIC client
-func QuicClient(endpoint string) (quicGo.Stream, error) {
-	tlsConf := &tls.Config{
-		InsecureSkipVerify: true, // nolint
-		NextProtos:         []string{"hq-29"},
-		//NextProtos: []string{"http/1.1"},
-	}
-
-	session, err := quicGo.DialAddr(endpoint, tlsConf, &quic.Config{
-		MaxIdleTimeout:        time.Minute * 10080,
-		KeepAlive:             true,
-		MaxIncomingStreams:    1000000,
-		MaxIncomingUniStreams: 1000000,
-	})
-
+func QuicClient(endpoint string) (*transport.Client, error) {
+	config := transport.NewConfig()
+	config.TLS.InsecureSkipVerify = true
+	// config.LogLevel = 3
+	client, err := transport.NewClient(endpoint, config)
 	if err != nil {
-		return nil, err
+		fmt.Println("l11allaal:", err)
+		return &transport.Client{}, err
 	}
+	return client, nil
+}
 
-	stream, err := session.OpenStreamSync(context.Background())
-	if err != nil {
-		return nil, err
+type serverHandler struct {
+	YomoFrameworkStreamWriter
+}
+
+func (s *serverHandler) Read(stream *transport.Stream) error {
+	s.YomoFrameworkStreamWriter.Writer = stream
+	buf := make([]byte, 55)
+	// index := 0
+	for {
+		n, _, err := stream.Read(buf)
+		if err != nil {
+			fmt.Println("server:", err)
+			return nil
+		}
+		if n > 0 {
+			s.Write(buf[:n])
+			stream.Send()
+			return nil
+		}
 	}
-
-	return stream, nil
 }
 
 // QuicServer create a QUIC server
 func QuicServer(endpoint string, plugin plugin.YomoObjectPlugin, codec *json.Codec) {
-	// Lock to use QUIC draft-29 version
-	conf := &quic.Config{
-		Versions:              []quicGo.VersionNumber{0xff00001d},
-		MaxIdleTimeout:        time.Minute * 10080,
-		KeepAlive:             true,
-		MaxIncomingStreams:    1000000,
-		MaxIncomingUniStreams: 1000000,
-	}
-	listener, err := quicGo.ListenAddr(endpoint, GenerateTLSConfig(endpoint), conf)
-
+	config := transport.NewConfig()
+	err := config.SetDefaultTLSCertificate()
+	//config.LogLevel = 3
 	if err != nil {
-		panic(err)
+		fmt.Println("asdasda:", err)
+		return
 	}
+	//config.TLS.InsecureSkipVerify = true
 
-	var n = 0
-	for {
-		n = n + 1
-		logger.Debugf("QuicServer::loop[%v] Accept before", n)
-		session, err := listener.Accept(context.Background())
-		if err != nil {
-			logger.Errorf("QuicServer::Accept error: %s", err.Error())
-			continue
-		}
-		logger.Debugf("QuicServer::loop[%v] Accept after: %v", n, session.ConnectionState())
-
-		logger.Debugf("QuicServer::loop[%v] AcceptStream before", n)
-		stream, err := session.AcceptStream(context.Background())
-		if err != nil {
-			logger.Errorf("QuicServer::AcceptStream error: %s", err.Error())
-			continue
-		}
-		logger.Debugf("QuicServer::loop[%v] AcceptStream after: %v", n, stream.StreamID())
-		logger.Infof("QuicServer::Establish new Stream: StreamID=%v", stream.StreamID())
-
-		go func() {
-			go monitorContextErr(session, stream)
-			yStream := YomoFrameworkStreamWriter{plugin.Name(), codec, plugin, stream}
-			_, err = CopyTo(yStream, stream)
-			//_, err = io.Copy(yStream, stream)
-			if err != nil {
-				closeSession(session, stream)
-			}
-		}()
+	server, err := transport.NewServer(config)
+	if err != nil {
+		fmt.Println(err)
+		return
 	}
+	yStream := YomoFrameworkStreamWriter{plugin.Name(), codec, plugin, nil}
+	serverReader := serverHandler{yStream}
+	server.SetHandler(&serverReader)
+
+	server.ListenAndServe(":4241")
+
+	// go func() {
+	// 	go monitorContextErr(session, stream)
+	// 	yStream := YomoFrameworkStreamWriter{plugin.Name(), codec, plugin, stream}
+	// 	_, err = CopyTo(yStream, stream)
+	// 	//_, err = io.Copy(yStream, stream)
+	// 	if err != nil {
+	// 		closeSession(session, stream)
+	// 	}
+	// }()
 }
 
-func monitorContextErr(session quicGo.Session, stream quicGo.Stream) {
-	for {
-		var err error = nil
-		if session.Context().Err() != nil {
-			err = session.Context().Err()
-			logger.Errorf("session context error: %v", err)
-		}
-		if stream.Context().Err() != nil {
-			err = stream.Context().Err()
-			logger.Errorf("stream context error: %v", err)
-		}
-		if err != nil {
-			closeSession(session, stream)
-			break
-		}
-		time.Sleep(5 * time.Second)
-	}
+// func monitorContextErr(session quicGo.Session, stream quicGo.Stream) {
+// 	for {
+// 		var err error = nil
+// 		if session.Context().Err() != nil {
+// 			err = session.Context().Err()
+// 			logger.Errorf("session context error: %v", err)
+// 		}
+// 		if stream.Context().Err() != nil {
+// 			err = stream.Context().Err()
+// 			logger.Errorf("stream context error: %v", err)
+// 		}
+// 		if err != nil {
+// 			closeSession(session, stream)
+// 			break
+// 		}
+// 		time.Sleep(5 * time.Second)
+// 	}
 
-}
+// }
 
-func closeSession(session quicGo.Session, stream quicGo.Stream) {
-	var err error
+// func closeSession(session quicGo.Session, stream quicGo.Stream) {
+// 	var err error
 
-	// close stream
-	streamID := stream.StreamID()
-	err = stream.Close()
-	if err != nil {
-		logger.Errorf("stream[%v] close error: %s", streamID, err.Error())
-	} else {
-		logger.Infof("stream[%v] closed", streamID)
-	}
+// 	// close stream
+// 	streamID := stream.StreamID()
+// 	err = stream.Close()
+// 	if err != nil {
+// 		logger.Errorf("stream[%v] close error: %s", streamID, err.Error())
+// 	} else {
+// 		logger.Infof("stream[%v] closed", streamID)
+// 	}
 
-	// close session
-	err = session.CloseWithError(0, "close session")
-	if err != nil {
-		logger.Errorf("close session error: %s", err.Error())
-	}
-}
+// 	// close session
+// 	err = session.CloseWithError(0, "close session")
+// 	if err != nil {
+// 		logger.Errorf("close session error: %s", err.Error())
+// 	}
+// }
 
-// GenerateTLSConfig Setup a bare-bones TLS config for the server
-func GenerateTLSConfig(host ...string) *tls.Config {
-	tlsCert, _ := Certificate(host...)
+// // GenerateTLSConfig Setup a bare-bones TLS config for the server
+// func GenerateTLSConfig(host ...string) *tls.Config {
+// 	tlsCert, _ := Certificate(host...)
 
-	return &tls.Config{
-		Certificates: []tls.Certificate{tlsCert},
-		NextProtos:   []string{"hq-29"},
-		//NextProtos: []string{"http/1.1"},
-	}
-}
+// 	return &tls.Config{
+// 		Certificates: []tls.Certificate{tlsCert},
+// 		NextProtos:   []string{"hq-29"},
+// 		//NextProtos: []string{"http/1.1"},
+// 	}
+// }
 
-func Certificate(host ...string) (tls.Certificate, error) {
-	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		return tls.Certificate{}, err
-	}
+// func Certificate(host ...string) (tls.Certificate, error) {
+// 	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+// 	if err != nil {
+// 		return tls.Certificate{}, err
+// 	}
 
-	notBefore := time.Now()
-	notAfter := notBefore.Add(time.Hour * 24 * 365)
+// 	notBefore := time.Now()
+// 	notAfter := notBefore.Add(time.Hour * 24 * 365)
 
-	serialNumberLimit := new(big.Int).Lsh(big.NewInt(1), 128)
-	serialNumber, err := rand.Int(rand.Reader, serialNumberLimit)
-	if err != nil {
-		return tls.Certificate{}, err
-	}
+// 	serialNumberLimit := new(big.Int).Lsh(big.NewInt(1), 128)
+// 	serialNumber, err := rand.Int(rand.Reader, serialNumberLimit)
+// 	if err != nil {
+// 		return tls.Certificate{}, err
+// 	}
 
-	template := x509.Certificate{
-		SerialNumber: serialNumber,
-		Subject: pkix.Name{
-			Organization: []string{"YoMo"},
-		},
-		NotBefore: notBefore,
-		NotAfter:  notAfter,
+// 	template := x509.Certificate{
+// 		SerialNumber: serialNumber,
+// 		Subject: pkix.Name{
+// 			Organization: []string{"YoMo"},
+// 		},
+// 		NotBefore: notBefore,
+// 		NotAfter:  notAfter,
 
-		KeyUsage:              x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature,
-		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
-		BasicConstraintsValid: true,
-	}
+// 		KeyUsage:              x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature,
+// 		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+// 		BasicConstraintsValid: true,
+// 	}
 
-	for _, h := range host {
-		if ip := net.ParseIP(h); ip != nil {
-			template.IPAddresses = append(template.IPAddresses, ip)
-		} else {
-			template.DNSNames = append(template.DNSNames, h)
-		}
-	}
+// 	for _, h := range host {
+// 		if ip := net.ParseIP(h); ip != nil {
+// 			template.IPAddresses = append(template.IPAddresses, ip)
+// 		} else {
+// 			template.DNSNames = append(template.DNSNames, h)
+// 		}
+// 	}
 
-	template.IsCA = true
-	template.KeyUsage |= x509.KeyUsageCertSign
+// 	template.IsCA = true
+// 	template.KeyUsage |= x509.KeyUsageCertSign
 
-	derBytes, err := x509.CreateCertificate(rand.Reader, &template, &template, &priv.PublicKey, priv)
-	if err != nil {
-		return tls.Certificate{}, err
-	}
+// 	derBytes, err := x509.CreateCertificate(rand.Reader, &template, &template, &priv.PublicKey, priv)
+// 	if err != nil {
+// 		return tls.Certificate{}, err
+// 	}
 
-	// create public key
-	certOut := bytes.NewBuffer(nil)
-	err = pem.Encode(certOut, &pem.Block{Type: "CERTIFICATE", Bytes: derBytes})
-	if err != nil {
-		return tls.Certificate{}, err
-	}
+// 	// create public key
+// 	certOut := bytes.NewBuffer(nil)
+// 	err = pem.Encode(certOut, &pem.Block{Type: "CERTIFICATE", Bytes: derBytes})
+// 	if err != nil {
+// 		return tls.Certificate{}, err
+// 	}
 
-	// create private key
-	keyOut := bytes.NewBuffer(nil)
-	b, err := x509.MarshalECPrivateKey(priv)
-	if err != nil {
-		return tls.Certificate{}, err
-	}
-	err = pem.Encode(keyOut, &pem.Block{Type: "EC PRIVATE KEY", Bytes: b})
-	if err != nil {
-		return tls.Certificate{}, err
-	}
+// 	// create private key
+// 	keyOut := bytes.NewBuffer(nil)
+// 	b, err := x509.MarshalECPrivateKey(priv)
+// 	if err != nil {
+// 		return tls.Certificate{}, err
+// 	}
+// 	err = pem.Encode(keyOut, &pem.Block{Type: "EC PRIVATE KEY", Bytes: b})
+// 	if err != nil {
+// 		return tls.Certificate{}, err
+// 	}
 
-	return tls.X509KeyPair(certOut.Bytes(), keyOut.Bytes())
-}
+// 	return tls.X509KeyPair(certOut.Bytes(), keyOut.Bytes())
+// }
 
 func CopyTo(dst io.Writer, src io.Reader) (written int64, err error) {
 	var buf []byte
